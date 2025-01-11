@@ -3,12 +3,12 @@ import asyncio
 from typing import List, Optional
 import aiohttp
 from aiohttp import ClientResponseError, ContentTypeError
-import logging  # Импортируем модуль logging
+import logging
 
 API_BASE_URL = "https://api.bybit.com/v5/market/"
 
 # Используем общий логгер
-logger = logging.getLogger(__name__)  # Получаем логгер с именем текущего модуля
+logger = logging.getLogger(__name__)
 
 async def get_usdt_perpetual_symbols(session: aiohttp.ClientSession) -> List[str]:
     """

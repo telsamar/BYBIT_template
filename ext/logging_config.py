@@ -3,7 +3,7 @@ import logging
 
 def setup_logger(
     log_file: str = 'app.log',
-    level: int = logging.DEBUG
+    level: int = logging.INFO
 ) -> logging.Logger:
     """
     Настраивает и возвращает корневой логгер для проекта.
@@ -12,17 +12,14 @@ def setup_logger(
     :param level: Уровень логирования.
     :return: Настроенный корневой логгер.
     """
-    logger = logging.getLogger()  # Получаем корневой логгер
+    logger = logging.getLogger()
     logger.setLevel(level)
     
-    # Удаляем существующие обработчики, чтобы избежать дублирования логов при повторных вызовах
     if logger.hasHandlers():
         logger.handlers.clear()
     
-    # Форматтер для логов
     formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
     
-    # Создаём FileHandler для записи логов в файл с перезаписью
     file_handler = logging.FileHandler(log_file, mode='w', encoding='utf-8')
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)

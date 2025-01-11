@@ -20,19 +20,22 @@ class SharedState:
         self.lock: asyncio.Lock = asyncio.Lock()
         self.limit_reached_event: asyncio.Event = asyncio.Event()
 
-
 # Загрузка переменных окружения
 load_dotenv()
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 CHAT_ID = os.getenv('CHAT_ID')
-MESSAGE_LIMIT = int(os.getenv('MESSAGE_LIMIT', 20))
+
+# Определение MESSAGE_LIMIT и MANUAL_RUN в коде
+MESSAGE_LIMIT = 20  # Максимальное количество сообщений
+MANUAL_RUN = os.getenv('MANUAL_RUN', 'false').lower() == 'true'  # Режим ручного запуска
 
 # Проверка обязательных переменных
 if not BOT_TOKEN or not CHAT_ID:
     raise ValueError("BOT_TOKEN и CHAT_ID должны быть установлены в .env файле.")
 
 # Настройка логгера
-logger = logging.getLogger(__name__)  # Получаем логгер текущего модуля
+setup_logger(log_file='app.log', level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 async def fetch_and_analyze(
     symbol: str,
@@ -49,7 +52,7 @@ async def fetch_and_analyze(
     :param interval_key: Ключ интервала (например, '15').
     :param interval_value: Значение интервала для отображения (например, '15m').
     :param session: Клиентская сессия aiohttp.
-    :param signals: Словарь для хранения сигналов.
+    :param signals: Словарь для хранения сигналов по действиям.
     :param shared_state: Общее состояние для управления лимитами.
     """
     if shared_state.limit_reached_event.is_set():
@@ -97,9 +100,8 @@ async def fetch_and_analyze(
         signal = analysis.get('signal')
 
         if signal:
-            trade_action = "🔴 SHORT" if signal == "short" else "🟢 LONG"
-            signals[symbol]['trade_action'] = trade_action
-            signals[symbol]['intervals'].append(interval_value)
+            trade_action = "SHORT" if signal == "short" else "LONG"
+            signals[trade_action].append(interval_value)
 
     except aiohttp.ClientResponseError as e:
         logger.error(f"Ошибка при получении данных свечей для {symbol}: {e.status}, {e.message}, URL: {e.request_info.url}")
@@ -130,7 +132,7 @@ async def process_symbol(
         if shared_state.limit_reached_event.is_set():
             return
 
-        signals = defaultdict(lambda: {'intervals': [], 'trade_action': None})
+        signals = defaultdict(list)  # Новый формат: {action: [intervals]}
         tasks = [
             fetch_and_analyze(symbol, interval_key, interval_value, session, signals, shared_state)
             for interval_key, interval_value in intervals.items()
@@ -138,30 +140,31 @@ async def process_symbol(
 
         await asyncio.gather(*tasks)
 
-        # Формируем сообщение для символа, если есть сигналы
-        for sym, data in signals.items():
-            if shared_state.limit_reached_event.is_set():
+        # Если не найдено никаких сигналов, ничего не делаем
+        if not signals:
+            return
+
+        # Формируем сообщение для символа
+        message_lines = [f"#{symbol}"]
+        for action, intervals_list in signals.items():
+            if not intervals_list:
+                continue
+            unique_intervals = sorted(set(intervals_list), key=lambda x: ['5m', '15m', '1h', '4h', '12h', '1d'].index(x) if x in ['5m', '15m', '1h', '4h', '12h', '1d'] else len(x))
+            intervals_str = ", ".join(unique_intervals)
+            emoji = "🟢" if action == "LONG" else "🔴"
+            message_lines.append(f"{emoji} {action} {intervals_str}")
+
+        message = "\n".join(message_lines) + "\n"
+
+        # Попытка увеличить счётчик сообщений
+        async with shared_state.lock:
+            if shared_state.messages_sent >= shared_state.message_limit:
+                shared_state.limit_reached_event.set()
+                logger.info("Достигнут лимит сообщений. Остановка дальнейшей обработки.")
                 return
+            shared_state.messages_sent += 1
 
-            if data['trade_action']:
-                intervals_text = ", ".join(data['intervals'])
-                trade_action = data['trade_action']
-
-                message = (
-                    f"🔥 #{sym}\n"
-                    f"🕒 {intervals_text}\n"
-                    f"{trade_action}\n"
-                )
-
-                # Попытка увеличить счётчик сообщений
-                async with shared_state.lock:
-                    if shared_state.messages_sent >= shared_state.message_limit:
-                        shared_state.limit_reached_event.set()
-                        logger.info("Достигнут лимит сообщений. Остановка дальнейшей обработки.")
-                        return
-                    shared_state.messages_sent += 1
-
-                await message_queue.put(message)
+        await message_queue.put(message)
 
 async def main() -> None:
     """
@@ -169,18 +172,18 @@ async def main() -> None:
 
     Загружает символы, определяет интервалы, запускает обработку символов и воркеров для отправки сообщений.
     """
-    is_manual_run = os.getenv("MANUAL_RUN", "false").lower() == "true"
+    is_manual_run = MANUAL_RUN
     current_time = datetime.now()
     current_minute = current_time.minute
     current_hour = current_time.hour
 
     intervals = {
-        # '5': '5m',
-        # '15': '15m',
-        # '30': '30m',
+        '5': '5m',
+        '15': '15m',
+        '30': '30m',
         '60': '1h',
-        # '240': '4h',
-        # '720': '12h',
+        '240': '4h',
+        '720': '12h',
     }
 
     if not is_manual_run:
@@ -198,7 +201,7 @@ async def main() -> None:
         elif current_minute % 5 == 0:
             intervals = {k: v for k, v in intervals.items() if k in ['5']}
         else:
-            logger.info("Запуск скрипта с 1-минутным интервалом.")
+            logger.info("Запуск в неправильное время.")
             return
 
     MAX_CONCURRENT_TASKS = 50
@@ -209,8 +212,12 @@ async def main() -> None:
     shared_state = SharedState(message_limit=MESSAGE_LIMIT)
 
     async with aiohttp.ClientSession() as session:
+        # Определите множество исключаемых символов
+        excluded_symbols = {'USDCUSDT', 'FDUSDUSDT'}
+
+        # Получите список символов и отфильтруйте их
         symbols = await get_usdt_perpetual_symbols(session)
-        symbols = [symbol for symbol in symbols if symbol.upper() != 'USDCUSDT']
+        symbols = [symbol for symbol in symbols if symbol.upper() not in excluded_symbols]
 
         if not symbols:
             # Инициализация бота внутри main
@@ -218,8 +225,9 @@ async def main() -> None:
                 await send_telegram_message(bot, CHAT_ID, "❌ Список символов пуст.", logger)
             return
 
-        # if len(symbols) >= 0:
-        #     test_symbol = 'PAXGUSDT'
+        # Если хотите протестировать на конкретном символе, раскомментируйте блок ниже
+        # if len(symbols) >= 10:
+        #     test_symbol = symbols[9]  # Индексация с 0
         #     symbols = [test_symbol]
         #     logger.info(f"Тестирование на символе: {test_symbol}")
         # else:
@@ -256,5 +264,5 @@ async def main() -> None:
 
 if __name__ == "__main__":
     # Настраиваем логгер перед запуском основного цикла
-    setup_logger(log_file='app.log', level=logging.DEBUG)
+    setup_logger(log_file='app.log', level=logging.INFO)
     asyncio.run(main())
