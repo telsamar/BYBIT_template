@@ -1,76 +1,57 @@
 # helpers.py
+
+import os
 import logging
 from typing import List, Dict, Optional
 
+from patterns.stochastic_oscillator import calculate_stochastic_oscillator
+from patterns.macd import calculate_macd
+
 logger = logging.getLogger(__name__)
 
-def analyze_candles(candles: List[Dict[str, float]]) -> Dict[str, Optional[str]]:
+def analyze_candles(
+    candles: List[Dict[str, float]],
+    k_period: int = int(os.getenv("K_PERIOD", 14)),
+    d_period: int = int(os.getenv("D_PERIOD", 3)),
+    macd_fast: int = int(os.getenv("FAST_PERIOD", 12)),
+    macd_slow: int = int(os.getenv("SLOW_PERIOD", 26)),
+    macd_signal: int = int(os.getenv("SIGNAL_PERIOD", 9)),
+    overbought: float = float(os.getenv("OVERBOUGHT", 90.0)),
+    oversold: float = float(os.getenv("OVERSOLD", 10.0)),
+) -> Dict[str, Optional[float]]:
     """
-    Функция для анализа данных свечей. Это шаблон для дальнейшей разработки аналитики.
-    
-    **Инструкция по дальнейшей разработке:**
-    
-    1. **Проверка входных данных:**
-       - Убедитесь, что каждая свеча содержит все необходимые ключи: 
-         'start', 'open', 'high', 'low', 'close', 'volume'.
-       - При необходимости реализуйте дополнительные проверки корректности и типов значений.
-    
-    2. **Реализация логики анализа:**
-       - Добавьте расчёты и алгоритмы для определения тренда (например, восходящий, нисходящий или боковой).
-       - Реализуйте алгоритмы по распознанию моделей свечей (например, bullish/bearish engulfing, доджи, hammer и т.д.).
-       - При необходимости, используйте дополнительные индикаторы (объём торгов, скользящие средние, RSI, MACD и т.д.).
-    
-    3. **Формирование торгового сигнала:**
-       - На основе проведённого анализа определите торговый сигнал:
-           * 'long'  — если условия для покупки выполнены;
-           * 'short' — если условия для продажи выполнены;
-           * None    — если сигнал не определён.
-       - Рекомендуется возвращать результат в виде словаря, где обязательно присутствует ключ 'signal'. 
-         При необходимости можно добавить и другие данные, например, рассчитанные индикаторы или параметры модели.
-         Пример результата: {'signal': 'long', 'trend': 'uptrend', ...}
-    
-    :param candles: Список свечей, где каждая свеча представлена словарём с ключами:
-                    'start', 'open', 'high', 'low', 'close', 'volume'
-    :return: Словарь с ключом 'signal' (значением 'long', 'short' или None) и, при необходимости, другими данными анализа.
-    """
-    # Инициализация результирующего словаря
-    analysis = {'signal': None}
-    
-    # Пример базовой проверки: достаточно ли данных для анализа
-    if len(candles) < 2:
-        logger.warning("Недостаточно данных для анализа свечей.")
-        return analysis
+    Анализирует свечи на основе стохастического осциллятора и MACD.
 
-    # =======================================================================
-    # ВАША ЛОГИКА АНАЛИЗА ЗДЕСЬ
-    #
-    # 1. Проверка корректности данных:
-    #    - Переберите свечи и убедитесь, что все необходимые ключи присутствуют.
-    #
-    # 2. Расчёты и алгоритмы:
-    #    - Определите направление тренда (например, на основе суммарного изменения цены).
-    #    - Реализуйте определение свечных моделей, например:
-    #          bullish_engulfing, bearish_engulfing, hammer и др.
-    #    - При необходимости, вычислите дополнительные индикаторы (объём, скользящие средние, RSI, MACD и т.д.).
-    #
-    # 3. Формирование сигнала:
-    #    - Если обнаружены условия для сигнала 'long', установите: analysis['signal'] = 'long'
-    #    - Если обнаружены условия для сигнала 'short', установите: analysis['signal'] = 'short'
-    #    - Если условия не выполнены, оставьте значение None
-    #
-    # 4. Возвращаемый результат:
-    #    - Минимум должен содержать ключ 'signal'.
-    #    - При необходимости, добавьте дополнительные ключи с данными анализа.
-    # =======================================================================
-    
-    # TODO: Реализуйте вашу аналитику здесь.
-    # Пример (раскомментируйте и адаптируйте по необходимости):
-    # trend = calculate_trend(candles)
-    # pattern = detect_pattern(candles)
-    # if trend == 'uptrend' and pattern == 'bullish':
-    #     analysis['signal'] = 'long'
-    # elif trend == 'downtrend' and pattern == 'bearish':
-    #     analysis['signal'] = 'short'
-    
-    logger.info("Анализ завершён. Результат: %s", analysis)
+    Генерация сигнала:
+      - 'long', если %K < oversold (по стохастику) и MACD > 0
+      - 'short', если %K > overbought и MACD < 0
+      - None в остальных случаях
+
+    """
+    analysis: Dict[str, Optional[float]] = {}
+
+    # Стохастик
+    percent_k, percent_d = calculate_stochastic_oscillator(candles, k_period, d_period)
+    analysis["%K"] = percent_k
+    analysis["%D"] = percent_d
+
+    # MACD
+    macd_line, signal_line, histogram = calculate_macd(
+        candles, fast_period=macd_fast, slow_period=macd_slow, signal_period=macd_signal
+    )
+    # берём последнее значение MACD‑линии
+    last_macd = macd_line[-1] if isinstance(macd_line, list) else macd_line
+    analysis["MACD"] = last_macd
+
+    # Определяем сигнал
+    signal: Optional[str] = None
+    if percent_k is not None and last_macd is not None:
+        if percent_k < oversold and last_macd > 0:
+            signal = "long"
+        elif percent_k > overbought and last_macd < 0:
+            signal = "short"
+
+    analysis["signal"] = signal
+
+    logger.info("Анализ завершён. Результат: %r", analysis)
     return analysis

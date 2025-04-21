@@ -7,10 +7,6 @@ def setup_logger(
 ) -> logging.Logger:
     """
     Настраивает и возвращает корневой логгер для проекта.
-
-    :param log_file: Путь к файлу лога.
-    :param level: Уровень логирования.
-    :return: Настроенный корневой логгер.
     """
     logger = logging.getLogger()
     logger.setLevel(level)

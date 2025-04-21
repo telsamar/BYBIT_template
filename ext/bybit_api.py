@@ -7,15 +7,11 @@ import logging
 
 API_BASE_URL = "https://api.bybit.com/v5/market/"
 
-# Используем общий логгер
 logger = logging.getLogger(__name__)
 
 async def get_usdt_perpetual_symbols(session: aiohttp.ClientSession) -> List[str]:
     """
     Получает список символов USDT Perpetual из API Bybit.
-
-    :param session: Клиентская сессия aiohttp.
-    :return: Список символов.
     """
     url = f"{API_BASE_URL}instruments-info"
     params = {
@@ -46,12 +42,6 @@ async def get_usdt_perpetual_symbols(session: aiohttp.ClientSession) -> List[str
 async def get_historical_kline_data(session: aiohttp.ClientSession, symbol: str, interval: str, limit: int) -> List[dict]:
     """
     Получает исторические данные свечей (kline) для заданного символа и интервала.
-
-    :param session: Клиентская сессия aiohttp.
-    :param symbol: Символ для получения данных.
-    :param interval: Интервал свечей (например, '1', '5', '15').
-    :param limit: Количество свечей.
-    :return: Список свечей в виде словарей.
     """
     url = f"{API_BASE_URL}kline"
     params = {
@@ -85,14 +75,6 @@ async def get_historical_kline_data(session: aiohttp.ClientSession, symbol: str,
 async def get_kline_with_retries(session: aiohttp.ClientSession, symbol: str, interval: str, limit: int, retries: int = 3, delay: int = 1) -> Optional[List[dict]]:
     """
     Пытается получить данные свечей с повторными попытками в случае неудачи.
-
-    :param session: Клиентская сессия aiohttp.
-    :param symbol: Символ для получения данных.
-    :param interval: Интервал свечей.
-    :param limit: Количество свечей.
-    :param retries: Количество повторных попыток.
-    :param delay: Задержка между попытками в секундах.
-    :return: Список свечей или None в случае неудачи.
     """
     for attempt in range(1, retries + 1):
         try:

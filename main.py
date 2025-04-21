@@ -20,20 +20,16 @@ class SharedState:
         self.lock: asyncio.Lock = asyncio.Lock()
         self.limit_reached_event: asyncio.Event = asyncio.Event()
 
-# Загрузка переменных окружения
 load_dotenv()
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 CHAT_ID = os.getenv('CHAT_ID')
 
-# Определение MESSAGE_LIMIT и MANUAL_RUN в коде
-MESSAGE_LIMIT = 20  # Максимальное количество сообщений
-MANUAL_RUN = os.getenv('MANUAL_RUN', 'false').lower() == 'true'  # Режим ручного запуска
+MESSAGE_LIMIT = 20
+MANUAL_RUN = os.getenv('MANUAL_RUN', 'false').lower() == 'true'
 
-# Проверка обязательных переменных
 if not BOT_TOKEN or not CHAT_ID:
     raise ValueError("BOT_TOKEN и CHAT_ID должны быть установлены в .env файле.")
 
-# Настройка логгера
 setup_logger(log_file='app.log', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -47,33 +43,22 @@ async def fetch_and_analyze(
 ) -> None:
     """
     Получает данные свечей и анализирует их для заданного символа и интервала.
-
-    :param symbol: Символ для обработки.
-    :param interval_key: Ключ интервала (например, '15').
-    :param interval_value: Значение интервала для отображения (например, '15m').
-    :param session: Клиентская сессия aiohttp.
-    :param signals: Словарь для хранения сигналов по действиям.
-    :param shared_state: Общее состояние для управления лимитами.
     """
     if shared_state.limit_reached_event.is_set():
         return
 
     try:
-        # Получаем данные свечей с повторными попытками
-        kline_data = await get_kline_with_retries(session, symbol, interval_key, limit=7)
+        kline_data = await get_kline_with_retries(session, symbol, interval_key, limit=36)
         if not kline_data:
             logger.warning(f"Нет данных свечей для {symbol} на интервале {interval_value}.")
             return
 
-        # Определение ключей для свечей
         fields = ['start', 'open', 'high', 'low', 'close', 'volume']
         
-        # Преобразование списков в словари и конвертация числовых значений
         candles = []
         for candle in kline_data[:-1]:
             candle_dict = dict(zip(fields, candle))
             try:
-                # Конвертация числовых полей в float
                 candle_dict['open'] = float(candle_dict['open'])
                 candle_dict['high'] = float(candle_dict['high'])
                 candle_dict['low'] = float(candle_dict['low'])
@@ -81,12 +66,11 @@ async def fetch_and_analyze(
                 candle_dict['volume'] = float(candle_dict['volume'])
             except ValueError as ve:
                 logger.error(f"Ошибка конвертации числовых значений для {symbol}: {ve}")
-                continue  # Пропустить эту свечу и перейти к следующей
+                continue
             candles.append(candle_dict)
 
         logger.debug(f"Преобразованные свечи для {symbol}: {candles}")
 
-        # Дополнительные проверки
         for candle in candles:
             if not all(key in candle for key in ['start', 'open', 'high', 'low', 'close', 'volume']):
                 logger.error(f"Недостающие ключи в свече для {symbol}: {candle}")
@@ -101,7 +85,12 @@ async def fetch_and_analyze(
 
         if signal:
             trade_action = "SHORT" if signal == "short" else "LONG"
-            signals[trade_action].append(interval_value)
+            signals[trade_action].append({
+                "interval": interval_value,
+                "k":    analysis["%K"],
+                "d":    analysis["%D"],
+                "macd": analysis["MACD"],
+            })
 
     except aiohttp.ClientResponseError as e:
         logger.error(f"Ошибка при получении данных свечей для {symbol}: {e.status}, {e.message}, URL: {e.request_info.url}")
@@ -120,19 +109,12 @@ async def process_symbol(
 ) -> None:
     """
     Обрабатывает символ на указанных интервалах и объединяет сигналы для одного символа.
-
-    :param symbol: Символ для обработки.
-    :param intervals: Словарь интервалов.
-    :param session: Клиентская сессия aiohttp.
-    :param semaphore: Семофор для ограничения одновременных задач.
-    :param message_queue: Очередь для сообщений.
-    :param shared_state: Общее состояние для управления лимитами.
     """
     async with semaphore:
         if shared_state.limit_reached_event.is_set():
             return
 
-        signals = defaultdict(list)  # Новый формат: {action: [intervals]}
+        signals = defaultdict(list)
         tasks = [
             fetch_and_analyze(symbol, interval_key, interval_value, session, signals, shared_state)
             for interval_key, interval_value in intervals.items()
@@ -140,31 +122,23 @@ async def process_symbol(
 
         await asyncio.gather(*tasks)
 
-        # Если не найдено никаких сигналов, ничего не делаем
         if not signals:
             return
 
-        # Формируем сообщение для символа
         message_lines = [f"#{symbol}"]
-        for action, intervals_list in signals.items():
-            if not intervals_list:
-                continue
-            unique_intervals = sorted(set(intervals_list), key=lambda x: ['5m', '15m', '1h', '4h', '12h', '1d'].index(x) if x in ['5m', '15m', '1h', '4h', '12h', '1d'] else len(x))
-            intervals_str = ", ".join(unique_intervals)
+        for action, entries in signals.items():
             emoji = "🟢" if action == "LONG" else "🔴"
-            message_lines.append(f"{emoji} {action} {intervals_str}")
+            for e in entries:
+                iv = e["interval"]
+                k  = e["k"]
+                d  = e["d"]
+                m  = e["macd"]
+                message_lines.append(
+                    f"{emoji} {action} {iv} — K={k:.2f}, D={d:.2f}, MACD={m:.6f}"
+                )
 
         message = "\n".join(message_lines) + "\n"
-
-        # Попытка увеличить счётчик сообщений
-        async with shared_state.lock:
-            if shared_state.messages_sent >= shared_state.message_limit:
-                shared_state.limit_reached_event.set()
-                logger.info("Достигнут лимит сообщений. Остановка дальнейшей обработки.")
-                return
-            shared_state.messages_sent += 1
-
-        await message_queue.put(message)
+    await message_queue.put(message)
 
 async def main() -> None:
     """
@@ -178,12 +152,12 @@ async def main() -> None:
     current_hour = current_time.hour
 
     intervals = {
-        '5': '5m',
-        '15': '15m',
+        # '5': '5m',
+        # '15': '15m',
         '30': '30m',
         '60': '1h',
         '240': '4h',
-        '720': '12h',
+        # '720': '12h',
     }
 
     if not is_manual_run:
@@ -212,15 +186,12 @@ async def main() -> None:
     shared_state = SharedState(message_limit=MESSAGE_LIMIT)
 
     async with aiohttp.ClientSession() as session:
-        # Определите множество исключаемых символов
         excluded_symbols = {'USDCUSDT', 'FDUSDUSDT'}
 
-        # Получите список символов и отфильтруйте их
         symbols = await get_usdt_perpetual_symbols(session)
         symbols = [symbol for symbol in symbols if symbol.upper() not in excluded_symbols]
 
         if not symbols:
-            # Инициализация бота внутри main
             async with Bot(token=BOT_TOKEN) as bot:
                 await send_telegram_message(bot, CHAT_ID, "❌ Список символов пуст.", logger)
             return
@@ -236,7 +207,6 @@ async def main() -> None:
 
         # Инициализация бота внутри main для правильного управления жизненным циклом
         async with Bot(token=BOT_TOKEN) as bot:
-            # Запускаем **одну** функцию run_message_workers, которая создаст нужное количество воркеров
             worker_task = asyncio.create_task(
                 run_message_workers(
                     bot,
@@ -247,7 +217,6 @@ async def main() -> None:
                 )
             )
 
-            # Запускаем обработку символов
             tasks = [
                 process_symbol(symbol, intervals, session, semaphore, message_queue, shared_state)
                 for symbol in symbols
@@ -255,14 +224,11 @@ async def main() -> None:
 
             await asyncio.gather(*tasks)
 
-            # Завершаем очередь сообщений, отправляя "EXIT" для каждого воркера
             for _ in range(MAX_WORKERS):
                 await message_queue.put("EXIT")
 
-            # Ожидаем завершения воркеров
             await worker_task
 
 if __name__ == "__main__":
-    # Настраиваем логгер перед запуском основного цикла
     setup_logger(log_file='app.log', level=logging.INFO)
     asyncio.run(main())
